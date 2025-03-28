@@ -1,6 +1,4 @@
 import pygame
-import cv2  # Add OpenCV for webcam support
-
 class JoystickListener:
     def __init__(self):
         # Initialize joystick
@@ -14,10 +12,6 @@ class JoystickListener:
         else:
             print("No joystick detected!")
 
-        # Initialize camera
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            raise Exception("Webcam not detected or cannot be opened!")
 
     def get_input(self):
         # Get joystick input
@@ -39,21 +33,14 @@ class JoystickListener:
         # Close joystick and camera
         pygame.joystick.quit()
         pygame.quit()
-        self.cap.release()
-        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     listener = JoystickListener()
     try:
         while True:
             inputs = listener.get_input()
-            print(inputs)  # Replace with robot control logic
+            # print(inputs)  # Replace with robot control logic
 
-            frame = listener.get_frame()
-            cv2.imshow("Webcam", frame)  # Display the webcam feed
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):  # Press 'q' to quit
-                break
     except KeyboardInterrupt:
         print("Exiting...")
     finally:

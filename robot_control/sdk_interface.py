@@ -1,4 +1,8 @@
 import logging
+from lerobot.common.robot_devices.robots.utils import *
+import torch
+from robot_control.configs import RandyConfig
+
 
 class SDKInterface:
     """
@@ -8,13 +12,17 @@ class SDKInterface:
         self.logger = logging.getLogger(__name__)
         # Initialize SDK connection here
         self.logger.info("SDK initialized.")
+        self.robot = make_robot_from_config(RandyConfig())
+        self.robot.connect()
+        print(f"{self.robot.capture_observation()}")
 
-    def send_joint_positions(self, joint_positions):
+    def send_joint_positions(self, joint_positions: torch.Tensor):
         """
         Send joint positions to the robot.
-        :param joint_positions: List of joint angles in radians.
+        :param joint_positions: List of joint angles in radians.a
         """
-        self.logger.debug(f"Sending joint positions: {joint_positions}")
+        assert isinstance(joint_positions, torch.Tensor), "Joint positions must be a torch.Tensor."
+        self.robot.send_action(joint_positions)
         # SDK-specific code to send joint positions
 
     def stop_robot(self):
