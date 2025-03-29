@@ -58,12 +58,100 @@ state = robot.get_state()
 robot.apply_torque([1.0, 2.0, 1.5, 0.5, 0.8, 1.0])
 ```
 
+## Running the Controller
+
+To run the robot controller, use the main.py script:
+
+```bash
+python main.py --mode joystick  # For joystick control
+# or
+python main.py --mode keyboard  # For keyboard control
+```
+
+## Configuration
+
+### Robot Configuration
+
+The SO100 robot uses the RandyConfig class defined in `so100_robot_control/configs/configs.py`. Make sure to update the port configuration to match your hardware setup:
+
+```python
+@RobotConfig.register_subclass("randy")
+@dataclass
+class RandyConfig(ManipulatorRobotConfig):
+    calibration_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "randy")
+    max_relative_target: int | None = None
+
+    follower_arms: dict[str, MotorsBusConfig] = field(
+        default_factory=lambda: {
+            "main": FeetechMotorsBusConfig(
+                port="/dev/YOUR_PORT_HERE",  # Update this to your port
+                motors={
+                    # name: (index, model)
+                    "shoulder_pan": [1, "sts3215"],
+                    "shoulder_lift": [2, "sts3215"],
+                    "elbow_flex": [3, "sts3215"],
+                    "wrist_flex": [4, "sts3215"],
+                    "wrist_roll": [5, "sts3215"],
+                    "gripper": [6, "sts3215"],
+                },
+            ),
+        }
+    )
+    # ... other config parameters ...
+```
+
+### Manipulator Modifications
+
+If you're using a custom robot configuration, you need to modify the `lerobot/common/robot_devices/robots/manipulator.py` file to add your robot type in three locations:
+
+1. In the `connect()` method where robot types are checked for torque mode:
+   ```python
+   if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
+       from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
+   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
+       from lerobot.common.robot_devices.motors.feetech import TorqueMode
+   ```
+
+2. In the `activate_calibration()` method:
+   ```python
+   if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
+       from lerobot.common.robot_devices.robots.dynamixel_calibration import run_arm_calibration
+       calibration = run_arm_calibration(arm, self.robot_type, name, arm_type)
+   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
+       from lerobot.common.robot_devices.robots.feetech_calibration import run_arm_manual_calibration
+       calibration = run_arm_manual_calibration(arm, self.robot_type, name, arm_type)
+   ```
+
+3. In the preset selection:
+   ```python
+   if self.robot_type in ["koch", "koch_bimanual"]:
+       self.set_koch_robot_preset()
+   elif self.robot_type == "aloha":
+       self.set_aloha_robot_preset()
+   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
+       self.set_so100_robot_preset()
+   ```
+
+### Calibration Files
+
+Make sure to create a calibration directory for your robot:
+
+```
+mkdir -p /Users/denizbekleyisseven/workspace/SO100_Control/so100_robot_control/configs/YOUR_CONFIG_NAME
+```
+
+During the first run, calibration files will be generated in this directory. Subsequent runs will use these calibration files.
+
 ## Dependencies
 
 - Python ≥ 3.10
 - NumPy ≥ 1.19.0
 - PyBullet ≥ 3.0.0
 - PyTorch ≥ 1.10.0
+- Pygame ≥ 2.6.0
+- Pyglet ≥ 2.1.0
+- Draccus ≥ 0.10.0
+- Feetech-servo-sdk ≥ 1.0.0
 - Gym ≥ 0.21.0 (for reinforcement learning applications)
 
 ## Development
