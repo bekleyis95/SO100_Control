@@ -1,21 +1,49 @@
-[tool.poetry]
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
 name = "so100_control"
 version = "0.1.0"
-description = "6-DOF robot control with inverse kinematics and trajectory generation"
-authors = ["Your Name <your.email@example.com>"]
+description = "Control system for SO-ARM100 robot"
 readme = "README.md"
-packages = [{ include = "robot_control" }]
+authors = [
+    {name = "Deniz Bekleyis Seven", email = "dseven1995@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.19.0",
+    "pybullet>=3.0.0",
+    "torch>=1.10.0",
+    # lerobot dependencies
+    "gym>=0.21.0",
+    "matplotlib>=3.3.0",
+    "opencv-python>=4.5.0",
+    "scipy>=1.7.0",
+    "pillow>=8.0.0",
+    "tqdm>=4.60.0",
+    # Added dependencies
+    "pygame>=2.6.0",
+    "pyglet>=2.1.0",
+    "draccus>=0.10.0",
+    "feetech-servo-sdk>=1.0.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-urdfpy = "^0.0.24"
-ikpy = "^3.2"
-numpy = "^1.23"
-scipy = "^1.10"
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "flake8>=4.0.0",
+]
 
-[tool.poetry.dev-dependencies]
-pytest = "^7.4"
+[tool.setuptools]
+packages = ["so100_robot_control"]
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100

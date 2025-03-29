@@ -1,11 +1,18 @@
-from robot_control.robot_controller import RobotController
+import argparse
+from so100_robot_control.combined_controller import CombinedController
 
 def main():
     """
     Main entry point for the SO100 Control application.
-    Initializes and runs the robot controller.
+    Parses command-line arguments and starts the appropriate controller.
     """
-    controller = RobotController()
+    parser = argparse.ArgumentParser(description='SO100 Robot Controller')
+    parser.add_argument('--mode', type=str, default='joystick', 
+                        choices=['joystick', 'keyboard'],
+                        help='Control mode: joystick or keyboard (default: joystick)')
+    args = parser.parse_args()
+    
+    controller = CombinedController(control_mode=args.mode)
     
     try:
         # Start the controller - this blocks until the user exits

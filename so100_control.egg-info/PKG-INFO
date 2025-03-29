@@ -1,3 +1,29 @@
+Metadata-Version: 2.4
+Name: so100_control
+Version: 0.1.0
+Summary: Control system for SO-ARM100 robot
+Author-email: Deniz Bekleyis Seven <dseven1995@gmail.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.19.0
+Requires-Dist: pybullet>=3.0.0
+Requires-Dist: torch>=1.10.0
+Requires-Dist: gym>=0.21.0
+Requires-Dist: matplotlib>=3.3.0
+Requires-Dist: opencv-python>=4.5.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: pillow>=8.0.0
+Requires-Dist: tqdm>=4.60.0
+Requires-Dist: pygame>=2.6.0
+Requires-Dist: pyglet>=2.1.0
+Requires-Dist: draccus>=0.10.0
+Requires-Dist: feetech-servo-sdk>=1.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=6.0.0; extra == "dev"
+Requires-Dist: black>=22.0.0; extra == "dev"
+Requires-Dist: isort>=5.0.0; extra == "dev"
+Requires-Dist: flake8>=4.0.0; extra == "dev"
+
 # SO100 Robot Control
 
 A Python package for controlling the SO-ARM100 robot system. This library provides interfaces for programming, simulating, and operating the SO-ARM100 robotic arm.
