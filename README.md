@@ -27,8 +27,6 @@ A Python package for controlling the SO-ARM100 robot system. This library provid
 
 3. Install the package and its dependencies:
    ```
-   conda install -c conda-forge numpy pybullet
-   conda install -c pytorch pytorch
    pip install -e .
    ```
 
@@ -40,23 +38,6 @@ You can also install the package using pip:
 pip install -e .
 ```
 
-## Usage
-
-```python
-import so100_robot_control as so100
-
-# Initialize the robot
-robot = so100.SO100Robot()
-
-# Move the robot to a target position
-robot.move_to_position([0.2, 0.3, 0.4])
-
-# Get the current state of the robot
-state = robot.get_state()
-
-# Control the robot with torque commands
-robot.apply_torque([1.0, 2.0, 1.5, 0.5, 0.8, 1.0])
-```
 
 ## Running the Controller
 
