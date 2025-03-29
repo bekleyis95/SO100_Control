@@ -27,8 +27,6 @@ A Python package for controlling the SO-ARM100 robot system. This library provid
 
 3. Install the package and its dependencies:
    ```
-   conda install -c conda-forge numpy pybullet
-   conda install -c pytorch pytorch
    pip install -e .
    ```
 
