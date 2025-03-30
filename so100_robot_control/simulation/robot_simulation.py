@@ -39,8 +39,8 @@ class RobotSimulation:
             old_angle = self.joint_angles[i]
             if not math.isclose(old_angle, new_angle, rel_tol=1e-5):
                 self.joint_angles[i] = new_angle
-                # info = p.getJointInfo(self.robot, i)
-                # joint_name = info[1].decode() if isinstance(info[1], bytes) else info[1]
+                info = p.getJointInfo(self.robot, i)
+                joint_name = info[1].decode() if isinstance(info[1], bytes) else info[1]
                 # logging.info("Joint '%s' (index %d) angle changed from %.5f to %.5f", joint_name, i, old_angle, new_angle)
     
     def set_joint_states(self, target_angles_deg):
