@@ -162,6 +162,7 @@ class CombinedController:
         try:
             # Capture the current observation from the robot
             observation = self.sdk.robot.capture_observation()["observation.state"]
+            
             print(f"Current robot state: {observation}")
             return observation
         except Exception as e:
@@ -186,6 +187,9 @@ class CombinedController:
             try:
                 self.simulator.set_joint_states(RobotSimulation.real_to_sim(self.current_position).tolist())
                 self.simulator.step_simulation()
+                # Print TCP pose in simulation mode
+                self.latest_tcp_pose = self.simulator.get_tcp_pose()
+                print(f"TCP Pose in simulation: {self.latest_tcp_pose}")
             except Exception as e:
                 print(f"Error in simulation update: {e}")
 

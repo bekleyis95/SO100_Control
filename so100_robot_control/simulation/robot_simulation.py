@@ -20,10 +20,10 @@ class RobotSimulation:
         p.setGravity(0, 0, -9.81)
         # Load URDF with fixed base
         self.robot = p.loadURDF(self.urdf_path, useFixedBase=True)
-        # Initialize camera 2 times closer to robot (adjust parameters accordingly)
         p.resetDebugVisualizerCamera(cameraDistance=1.0, cameraYaw=45, cameraPitch=-30, cameraTargetPosition=[0, 0, 0])
-        # Store initial joint states
         num_joints = p.getNumJoints(self.robot)
+        self.num_joints = num_joints          # NEW: store number of joints
+        self.time_step = 0.01                 # NEW: simulation time step
         for i in range(num_joints):
             state = p.getJointState(self.robot, i)
             self.joint_angles[i] = state[0]
@@ -52,7 +52,6 @@ class RobotSimulation:
             self.joint_angles[i] = target_rad
             info = p.getJointInfo(self.robot, i)
             joint_name = info[1].decode() if isinstance(info[1], bytes) else info[1]
-            logging.info("Set Joint '%s' (index %d) to %.5f rad", joint_name, i, target_rad)
     
     def sim_to_real(sim_angles):
         """
@@ -112,6 +111,116 @@ class RobotSimulation:
         
         return sim
     
+    def get_tcp_pose(self):
+        try:
+            num_joints = p.getNumJoints(self.robot)
+            tcp_state = p.getLinkState(self.robot, num_joints - 1)
+            return tcp_state[4], tcp_state[5]
+        except Exception as e:
+            logging.error(f"Error retrieving TCP pose: {e}")
+            return None, None
+    
+    def differential_ik(self, target_position, target_orientation, max_iters=100, threshold=1e-3, damping=0.01):
+        """
+        Compute joint angles using a differential IK approach with 6D control.
+        
+        Parameters:
+            target_position (list or np.array): Desired [x, y, z] position.
+            target_orientation (list or np.array): Desired quaternion [x, y, z, w].
+            max_iters (int): Maximum number of iterations.
+            threshold (float): Convergence threshold for combined error.
+            damping (float): Damping factor for the damped least squares method.
+            
+        Returns:
+            np.ndarray: Final joint angles in radians.
+        """
+        # Helper functions for quaternion operations
+        def quat_inverse(q):
+            return [-q[0], -q[1], -q[2], q[3]]
+        
+        def quat_multiply(q1, q2):
+            x1, y1, z1, w1 = q1
+            x2, y2, z2, w2 = q2
+            x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+            y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+            z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+            w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+            return [x, y, z, w]
+        
+        joint_angles = np.array([self.joint_angles.get(i, 0.0) for i in range(self.num_joints)])
+        
+        for _ in range(max_iters):
+            # Get current end-effector state
+            tcp_state = p.getLinkState(self.robot, self.num_joints - 1, computeForwardKinematics=True)
+            current_position = np.array(tcp_state[4])
+            current_orientation = tcp_state[5]  # quaternion [x,y,z,w]
+            
+            # Compute position error
+            pos_error = np.array(target_position) - current_position
+            
+            # Compute orientation error.
+            # Relative quaternion: q_err = target_orientation * inv(current_orientation)
+            q_inv = quat_inverse(current_orientation)
+            q_err = quat_multiply(target_orientation, q_inv)
+            # For small angle differences, orientation error vector = 2 * (vector part of q_err)
+            ori_error = 2 * np.array(q_err[:3])
+            
+            # Combine errors
+            error = np.concatenate((pos_error, ori_error))
+            if np.linalg.norm(error) < threshold:
+                break
+            
+            # Compute Jacobians: translation and rotation parts
+            jac_t, jac_r = p.calculateJacobian(
+                self.robot,
+                self.num_joints - 1,
+                [0, 0, 0],
+                joint_angles.tolist(),
+                [0.0]*self.num_joints,
+                [0.0]*self.num_joints
+            )
+            J_trans = np.array(jac_t)   # 3 x n
+            J_rot = np.array(jac_r)     # 3 x n
+            
+            # Form full 6-D Jacobian
+            J_full = np.vstack((J_trans, J_rot))  # 6 x n
+            
+            # Compute damped pseudo-inverse of full Jacobian
+            JT = J_full.T
+            inv_term = np.linalg.inv(J_full @ JT + damping * np.eye(J_full.shape[0]))
+            J_inv = JT @ inv_term
+            
+            # Compute change in joint angles
+            delta_theta = J_inv @ error
+            
+            # Incorporate joint limits into the update so that solutions remain feasible.
+            # Given limits (in degrees):
+            #   Lower limits: [-110, -110,  110,   20,  -20,  110]
+            #   Upper limits: [ 110,  110, -110, -200,  200,  -10]
+            lower_limits_deg = np.array([-110, -110,  110,   20,  -20,  110])
+            upper_limits_deg = np.array([ 110,  110, -110, -200,  200,  -10])
+            lower_limits = np.radians(lower_limits_deg)
+            upper_limits = np.radians(upper_limits_deg)
+            min_limits = np.minimum(lower_limits, upper_limits)
+            max_limits = np.maximum(lower_limits, upper_limits)
+            
+            # Modify delta_theta for feasibility on a per-joint basis.
+            for i in range(self.num_joints):
+                candidate = joint_angles[i] + delta_theta[i]
+                if candidate > max_limits[i]:
+                    delta_theta[i] = max_limits[i] - joint_angles[i]
+                elif candidate < min_limits[i]:
+                    delta_theta[i] = min_limits[i] - joint_angles[i]
+            
+            joint_angles += delta_theta
+            
+            # Update simulation state (convert to degrees for set_joint_states)
+            self.set_joint_states(np.degrees(joint_angles))
+            p.stepSimulation()
+            time.sleep(self.time_step)
+        
+        return joint_angles
+    
     def run(self, simulation_mode='predefined'):
         if simulation_mode == 'predefined':
             logging.info("Starting infinite PyBullet simulation loop with predefined joint states")
@@ -151,8 +260,71 @@ class RobotSimulation:
             except KeyboardInterrupt:
                 logging.info("Simulation terminated by user")
                 p.disconnect()
+        elif simulation_mode == 'user':
+            logging.info("Starting PyBullet simulation in user input mode")
+            self.init_simulation()
+            try:
+                while True:
+                    print("Current tcp position:", self.get_tcp_pose())
+                    inp = input("Enter target position as x,y,z (or type 'exit' to quit): ")
+                    if inp.strip().lower() == 'exit':
+                        break
+                    try:
+                        vals = [float(x) for x in inp.split(",")]
+                        if len(vals) != 3:
+                            print("Please provide exactly three comma-separated values.")
+                            continue
+                    except Exception as e:
+                        print(f"Invalid input: {e}")
+                        continue
+                    target_position = vals
+                    # Fixed target orientation (identity quaternion)
+                    target_orientation = [0, 0.707, 0.707, 0]
+                    # Use differential IK instead of PyBullet's IK
+                    ik_solution = self.differential_ik(target_position, target_orientation)
+                    # Update joint states (convert radians to degrees)
+                    self.set_joint_states(np.degrees(ik_solution))
+                    t_start = time.time()
+                    while time.time() - t_start < 3.0:
+                        self.step_simulation()
+            except KeyboardInterrupt:
+                logging.info("User input mode terminated by user")
+            p.disconnect()
+        elif simulation_mode == 'draw':
+            logging.info("Starting simulation in draw mode (drawing a box with smooth interpolation)")
+            self.init_simulation()
+            # Define waypoints that form a rectangular box:
+            # Corners: (0.05, -0.15, 0.15), (0.05, -0.25, 0.15), (-0.05, -0.25, 0.15), (-0.05, -0.15, 0.15)
+            waypoints = [
+                [0.05, -0.15, 0.15],
+                [0.05, -0.25, 0.15],
+                [-0.05, -0.25, 0.15],
+                [-0.05, -0.15, 0.15]
+            ]
+            # Append the first point to close the loop
+            waypoints.append(waypoints[0])
+            # Fixed target orientation for drawing
+            target_orientation = [0, 0.707, 0.707, 0]
+            num_interp_steps = 10  # Number of interpolation steps between waypoints
+            try:
+                for _ in range(20):  # Repeat the drawing twice
+                    for i in range(len(waypoints)-1):
+                        start_pt = np.array(waypoints[i])
+                        end_pt = np.array(waypoints[i+1])
+                        for alpha in np.linspace(0, 1, num_interp_steps):
+                            interp_target = (1 - alpha) * start_pt + alpha * end_pt
+                            logging.info("Moving to interpolated target: %s", interp_target)
+                            ik_solution = self.differential_ik(interp_target.tolist(), target_orientation, max_iters=20)
+                            self.set_joint_states(np.degrees(ik_solution))
+                            t_start = time.time()
+                            while time.time() - t_start < 0.1:
+                                self.step_simulation()
+                    logging.info("Completed drawing the box.")
+            except KeyboardInterrupt:
+                logging.info("Draw mode terminated by user")
+            p.disconnect()
         else:
-            logging.error("Unknown simulation_mode: choose 'predefined' or 'real'")
+            logging.error("Unknown simulation_mode: choose 'predefined', 'real', 'user', or 'draw'")
 
 if __name__ == "__main__":
     # Provide the full path to the URDF file
