@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     {name = "Deniz Bekleyis Seven", email = "dseven1995@gmail.com"}
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 dependencies = [
     "numpy>=1.19.0",
     "pybullet>=3.0.0",
@@ -22,11 +22,6 @@ dependencies = [
     "scipy>=1.7.0",
     "pillow>=8.0.0",
     "tqdm>=4.60.0",
-    # Added dependencies
-    "pygame>=2.6.0",
-    "pyglet>=2.1.0",
-    "draccus>=0.10.0",
-    "feetech-servo-sdk>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -38,11 +33,11 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["so100_robot_control"]
+packages = [ "so100_robot_control"]
 
 [tool.black]
 line-length = 100
-target-version = ["py310"]
+target-version = ["py38"]
 
 [tool.isort]
 profile = "black"

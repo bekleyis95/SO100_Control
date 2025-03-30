@@ -3,6 +3,7 @@ import torch
 import time
 import threading
 import argparse
+from so100_robot_control.simulation.robot_simulation import RobotSimulation
 from so100_robot_control.teleop_devices.joystick_listener import JoystickController
 from so100_robot_control.teleop_devices.keyboard_listener import KeyboardController
 from so100_robot_control.robot_interface import SO100RobotInterface
@@ -12,10 +13,18 @@ class CombinedController:
     Wrapper class that allows choosing between joystick or keyboard control modes.
     Sets up the robot SDK interface and passes control to the selected controller.
     """
-    def __init__(self, control_mode='joystick'):
+    def __init__(self, control_mode='joystick', simulate=False):
         # Initialize the SDK interface
         print("Initializing robot SDK interface...")
         self.sdk = SO100RobotInterface()
+        
+        # Simulation mode flag
+        self.simulation_mode = simulate
+        if self.simulation_mode:
+            from so100_robot_control.simulation.robot_simulation import RobotSimulation
+            urdf_path = "/Users/denizbekleyisseven/workspace/SO100_Control/SO-ARM100/URDF/SO_5DOF_ARM100_8j_URDF.SLDASM/urdf/SO_5DOF_ARM100_8j_URDF.SLDASM.urdf"
+            print("Initializing simulation instance...")
+            self.simulator = RobotSimulation(urdf_path)
         
         # Select and initialize the controller based on mode
         self.control_mode = control_mode
@@ -33,6 +42,7 @@ class CombinedController:
         # Register callbacks
         self.controller.register_shutdown_callback(self.emergency_stop)
         self.controller.register_tensor_changed_callback(self.on_tensor_changed)
+        self.controller.register_log_state_callback(self.get_robot_state)
         
         # Control settings
         self.control_rate = 30.0  # 30Hz
@@ -47,6 +57,8 @@ class CombinedController:
         # Start the control loop in a separate thread
         self.control_thread = threading.Thread(target=self._control_loop)
         self.control_thread.daemon = True
+        # Start controller interface in its own thread
+        self.controller_thread = None
     
     def _initialize_position(self):
         """Get the initial robot position and set it as origin"""
@@ -80,8 +92,11 @@ class CombinedController:
                 try:
                     # Update position with control tensor
                     if not torch.all(current_tensor == 0):
-                        # Add control tensor to current position
                         self.current_position = self.current_position + current_tensor
+                        # Clip joint positions to limits:
+                        min_limits = torch.tensor([-110, -20, -20, -110, -110, -10], device=self.current_position.device)
+                        max_limits = torch.tensor([110, 200, 200, 110, 110, 110], device=self.current_position.device)
+                        #self.current_position = torch.max(torch.min(self.current_position, max_limits), min_limits)
                         self.maintaining_position = False
                     
                     # Send the current target position to the robot
@@ -141,6 +156,17 @@ class CombinedController:
         print("Exiting program due to emergency stop")
         import os
         os._exit(0)
+
+    def get_robot_state(self):
+        """Get the current state of the robot"""
+        try:
+            # Capture the current observation from the robot
+            observation = self.sdk.robot.capture_observation()["observation.state"]
+            print(f"Current robot state: {observation}")
+            return observation
+        except Exception as e:
+            print(f"Error getting robot state: {e}")
+            return None
     
     def reset_to_origin(self):
         """Reset the robot position to the original starting position"""
@@ -161,13 +187,30 @@ class CombinedController:
         print("Press Ctrl+C to stop")
         
         try:
-            # Start the control thread
+            # For simulation mode, initialize simulation on main thread
+            if self.simulation_mode:
+                print("Initializing simulation on main thread...")
+                self.simulator.init_simulation()
+            
+            # Start control thread
             self.control_thread.start()
             
-            # Start the appropriate controller (this runs in the main thread)
-            print(f"Starting {self.control_mode} controller interface")
-            self.controller.run()  # This blocks until exited
-                
+            # Start the controller interface in its own thread since it blocks
+            self.controller_thread = threading.Thread(target=self.controller.run)
+            self.controller_thread.daemon = True
+            self.controller_thread.start()
+            
+            # Main thread loop for simulation updates if in simulation mode
+            while self.running:
+                if self.simulation_mode and self.current_position is not None:
+                    try:
+                        # Update simulation by stepping PyBullet; assuming simulator uses p.stepSimulation()
+                        self.simulator.set_joint_states(RobotSimulation.real_to_sim(self.current_position).tolist())
+                        self.simulator.step_simulation()
+                    except Exception as e:
+                        print(f"Error in simulation update: {e}")
+                time.sleep(self.control_interval)
+                        
         except KeyboardInterrupt:
             print("\nStopping controller due to keyboard interrupt")
             self.stop()
@@ -188,12 +231,19 @@ class CombinedController:
             
             # Stop the robot explicitly
             self.sdk.stop_robot()
+            
+            # If simulation mode is enabled, stop the simulation thread and disconnect simulation
+            if self.simulation_mode:
+                import pybullet as p
+                p.disconnect()
         except Exception as e:
             print(f"Error during shutdown: {e}")
         
         # Wait for control thread to finish
         if self.control_thread.is_alive():
             self.control_thread.join(timeout=1.0)
+        if self.controller_thread and self.controller_thread.is_alive():
+            self.controller_thread.join(timeout=1.0)
 
 
 def main():
@@ -202,9 +252,11 @@ def main():
     parser.add_argument('--mode', type=str, default='joystick', 
                         choices=['joystick', 'keyboard'],
                         help='Control mode: joystick or keyboard (default: joystick)')
+    parser.add_argument('--simulate', action='store_true',
+                        help='Enable simulation mode instead of using real robot')
     args = parser.parse_args()
     
-    controller = CombinedController(control_mode=args.mode)
+    controller = CombinedController(control_mode=args.mode, simulate=args.simulate)
     
     try:
         controller.start()

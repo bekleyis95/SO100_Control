@@ -28,6 +28,7 @@ class BaseController(ABC):
         # Add callbacks
         self.tensor_changed_callback = None
         self.shutdown_callback = None
+        self.log_state_callback = None
     
     def _print_tensor_state(self):
         """Print the current state of the control tensor in a clear format"""
@@ -55,6 +56,12 @@ class BaseController(ABC):
         """
         self.shutdown_callback = callback
     
+    def register_log_state_callback(self, callback):
+        """
+        Register a callback function that will be called to log the current state.
+        """
+        self.log_state_callback = callback
+
     def _change_control_element(self, element_idx):
         """Change which element is being controlled"""
         if 0 <= element_idx <= 5:  # Valid range for control tensor
@@ -82,6 +89,14 @@ class BaseController(ABC):
             print("No shutdown callback registered")
             import os
             os._exit(0)
+    
+    def _trigger_log_state(self):
+        """Log the current state of the control tensor"""
+        if self.log_state_callback:
+            try:
+                self.log_state_callback()
+            except Exception as e:
+                print(f"Error in log state callback: {e}")
     
     def _apply_axis_value(self, axis_name, value):
         """

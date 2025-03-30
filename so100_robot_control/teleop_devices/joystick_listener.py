@@ -50,7 +50,8 @@ class JoystickController(BaseController):
             print("EMERGENCY STOP BUTTON PRESSED - SHUTTING DOWN")
             self._trigger_shutdown()
             return
-        
+        elif button == 5:
+            self._trigger_log_state()
         # Reset control tensor whenever button is pressed to avoid lingering values
         self.control_tensor = torch.zeros(6)
         

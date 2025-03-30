@@ -10,9 +10,10 @@ def main():
     parser.add_argument('--mode', type=str, default='joystick', 
                         choices=['joystick', 'keyboard'],
                         help='Control mode: joystick or keyboard (default: joystick)')
+    parser.add_argument('--simulate', action='store_true')
     args = parser.parse_args()
     
-    controller = CombinedController(control_mode=args.mode)
+    controller = CombinedController(control_mode=args.mode, simulate=args.simulate)
     
     try:
         # Start the controller - this blocks until the user exits
