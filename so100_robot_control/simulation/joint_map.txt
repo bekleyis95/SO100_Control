@@ -1,0 +1,21 @@
+# real
+[0, 180, 180, 90,  0,  0] # home
+[0,   0,   0,  0,  0,  0] # extended
+
+[90, 90,  90, 90, 90, 90] # rotated
+# sim 
+[  0, -90, 90,   0, 90,  0]       # home
+[-90,  0,   0,   0,  0, 90],   # rotated
+[  0, 90, -90, -90, 90,  0],    # extended
+
+#relation
+real[0] = -sim[0]
+real[1] = -sim[1] + 90
+real[2] = sim[2] + 90
+real[3] = sim[3] + 90
+real[4] = -sim[4] + 90
+real[5] = sim[5]
+
+
+
+

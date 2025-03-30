@@ -13,7 +13,7 @@ def main():
     parser.add_argument('--simulate', action='store_true')
     args = parser.parse_args()
     
-    controller = CombinedController(control_mode=args.mode, simulate=args.simulate)
+    controller = CombinedController(control_mode=args.mode, simulate=True if args.simulate else False)
     
     try:
         # Start the controller - this blocks until the user exits

@@ -22,7 +22,7 @@ class CombinedController:
         self.simulation_mode = simulate
         if self.simulation_mode:
             from so100_robot_control.simulation.robot_simulation import RobotSimulation
-            urdf_path = "/Users/denizbekleyisseven/workspace/SO100_Control/SO-ARM100/URDF/SO_5DOF_ARM100_8j_URDF.SLDASM/urdf/SO_5DOF_ARM100_8j_URDF.SLDASM.urdf"
+            urdf_path = "SO-ARM100/URDF/SO_5DOF_ARM100_8j_URDF.SLDASM/urdf/SO_5DOF_ARM100_8j_URDF.SLDASM.urdf"
             print("Initializing simulation instance...")
             self.simulator = RobotSimulation(urdf_path)
         
@@ -180,37 +180,34 @@ class CombinedController:
             except Exception as e:
                 print(f"Error resetting to origin: {e}")
     
+    def _update_simulation(self):
+        # This function is scheduled in pyglet's event loop
+        if self.simulation_mode and self.current_position is not None:
+            try:
+                self.simulator.set_joint_states(RobotSimulation.real_to_sim(self.current_position).tolist())
+                self.simulator.step_simulation()
+            except Exception as e:
+                print(f"Error in simulation update: {e}")
+
     def start(self):
-        """Start the robot controller with the selected input method"""
         print(f"Starting Combined Robot Controller (Control rate: {self.control_rate}Hz)")
         print(f"Control mode: {self.control_mode}")
         print("Press Ctrl+C to stop")
         
         try:
-            # For simulation mode, initialize simulation on main thread
             if self.simulation_mode:
                 print("Initializing simulation on main thread...")
                 self.simulator.init_simulation()
+                import pyglet.clock
+                # Schedule simulation update via pyglet; this runs in the main thread
+                pyglet.clock.schedule_interval(lambda dt: self._update_simulation(), self.control_interval)
             
-            # Start control thread
+            # Start control thread (non-blocking)
             self.control_thread.start()
             
-            # Start the controller interface in its own thread since it blocks
-            self.controller_thread = threading.Thread(target=self.controller.run)
-            self.controller_thread.daemon = True
-            self.controller_thread.start()
+            # Run controller interface on main thread (pyglet.app.run is called inside)
+            self.controller.run()  # This will block in the main thread
             
-            # Main thread loop for simulation updates if in simulation mode
-            while self.running:
-                if self.simulation_mode and self.current_position is not None:
-                    try:
-                        # Update simulation by stepping PyBullet; assuming simulator uses p.stepSimulation()
-                        self.simulator.set_joint_states(RobotSimulation.real_to_sim(self.current_position).tolist())
-                        self.simulator.step_simulation()
-                    except Exception as e:
-                        print(f"Error in simulation update: {e}")
-                time.sleep(self.control_interval)
-                        
         except KeyboardInterrupt:
             print("\nStopping controller due to keyboard interrupt")
             self.stop()
