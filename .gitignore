@@ -1,0 +1,20 @@
+# all pycache files
+__pycache__/
+# all .pyc files
+*.pyc
+# all .pyo files
+*.pyo
+# all .pyd files
+*.pyd
+# all .pdb files
+*.pdb
+# all .egg files
+*.egg
+# all .egg-info files
+*.egg-info/
+# all .whl files
+*.whl
+# all .zip files
+*.zip
+# all .tar files
+*.tar
