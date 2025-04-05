@@ -1,5 +1,7 @@
 # all pycache files
 __pycache__/
+*/__pycache__/
+*/*/__pycache__/
 # all .pyc files
 *.pyc
 # all .pyo files
