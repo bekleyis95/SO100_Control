@@ -20,3 +20,22 @@ __pycache__/
 *.zip
 # all .tar files
 *.tar
+
+# Personal robot configs (contain serial port paths — not for commit)
+robots/so100.yaml
+robots/*.yaml
+!robots/so100.example.yaml
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Build / dist
+dist/
+build/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Poetry (project uses pip/pyproject.toml)
+poetry.lock

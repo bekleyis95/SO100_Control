@@ -29,6 +29,10 @@ class BaseController(ABC):
         self.tensor_changed_callback = None
         self.shutdown_callback = None
         self.log_state_callback = None
+        # Called once per frame on the main thread — used to tick the simulation
+        # visualisation so all PyBullet calls stay on the main thread (required
+        # on macOS where the OpenGL context is thread-affine).
+        self.tick_callback = None
     
     def _print_tensor_state(self):
         """Print the current state of the control tensor in a clear format"""
@@ -61,6 +65,10 @@ class BaseController(ABC):
         Register a callback function that will be called to log the current state.
         """
         self.log_state_callback = callback
+
+    def register_tick_callback(self, callback):
+        """Register a callback called once per frame on the main thread."""
+        self.tick_callback = callback
 
     def _change_control_element(self, element_idx):
         """Change which element is being controlled"""
@@ -98,40 +106,14 @@ class BaseController(ABC):
             except Exception as e:
                 print(f"Error in log state callback: {e}")
     
-    def _apply_axis_value(self, axis_name, value):
-        """
-        Apply a value from an axis to the control tensor
-        :param axis_name: 'x' or 'y'
-        :param value: float value between -1.0 and 1.0
-        """
-        # Store previous tensor for change detection
-        old_tensor = self.control_tensor.clone()
-        
-        # Apply deadzone to prevent drift when control is near center
-        if abs(value) < self.deadzone:
-            value = 0.0
-        
-        # Reset all values to ensure only one motor moves at a time
-        self.control_tensor = torch.zeros(6)
-        
-        # First check mode, then handle axis
-        if self.mode == "lower":
-            if axis_name == "y":  # Y axis controls current element
-                self.control_tensor[self.current_element] = self.coefficient * value
-            elif axis_name == "x":  # X axis controls element 0
-                self.control_tensor[0] = self.coefficient * value
-        elif self.mode == "upper":
-            if axis_name == "x":  # X-axis controls element 4 in upper mode
-                self.control_tensor[4] = self.coefficient * value
-            elif axis_name == "y":  # Y-axis controls element 5 in upper mode
-                self.control_tensor[5] = self.coefficient * value
-        
-        # Display the current state
-        self._print_tensor_state()
-        
-        # Check if the tensor has changed, notify callback if registered
-        if self.tensor_changed_callback and not torch.all(old_tensor == self.control_tensor):
-            self.tensor_changed_callback(self.control_tensor)
+    @abstractmethod
+    def _apply_axis_change(self, axis_name, value):
+        raise NotImplementedError("This method should be implemented by subclasses")
+    
+    # Modified signature to accept one parameter 'button'
+    @abstractmethod
+    def _apply_button_press(self, button):
+        raise NotImplementedError("This method should be implemented by subclasses")
     
     @abstractmethod
     def run(self):

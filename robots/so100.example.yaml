@@ -1,0 +1,35 @@
+# SO-ARM100 robot configuration
+# Copy to robots/so100.yaml, fill in your port, then run:
+#   python main.py --robot robots/so100.yaml
+#
+# robots/so100.yaml is .gitignored — commit the example, not the real file.
+
+# ── Required ────────────────────────────────────────────────────────────────
+
+# Serial port for the Feetech motor bus.
+#   macOS:  /dev/tty.usbmodemXXXXXX  (check with: ls /dev/tty.usb*)
+#   Linux:  /dev/ttyUSB0  or  /dev/ttyACM0
+port: YOUR_PORT_HERE
+
+# ── Optional ────────────────────────────────────────────────────────────────
+
+# Unique ID for this robot — used as the calibration filename:
+#   {calibration_dir}/{robot_id}.json
+# robot_id: so100
+
+# Set to true to run the interactive calibration flow on the next connect.
+# Leave false (default) to reuse the existing calibration file.
+# calibrate: false
+
+# Directory containing the calibration JSON file.
+# Defaults to so100_robot_control/configs/randy/ (bundled calibration).
+# calibration_dir: ~/.so100_control/calibration/
+
+# Path to a custom URDF file.
+# Relative paths are resolved relative to this YAML file.
+# Defaults to the bundled SO-ARM100 URDF if omitted.
+# urdf: path/to/your_robot.urdf
+
+# Maximum joint movement per control step in degrees (safety limit).
+# Uncomment and set to a positive value to cap large step commands.
+# max_relative_target: 5.0

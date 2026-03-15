@@ -1,165 +1,192 @@
-# SO100 Robot Control
+# SO-100 Control
 
-A Python package for controlling the SO-ARM100 robot system. This library provides interfaces for programming, simulating, and operating the SO-ARM100 robotic arm.
+Real-time teleoperation for the [SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) 5-DOF robot arm.
 
-## Features
+Supports **joint-space** and **Cartesian** control via joystick or keyboard, with an optional **PyBullet simulation** — no hardware required to get started.
 
-- Robot simulation using PyBullet
-- Direct control interface for the SO-ARM100 robot
-- Various control modes including position, velocity, and torque control
-- Support for reinforcement learning applications with Gym integration
+---
 
-## Installation
+## Install
 
-### Using Conda (Recommended)
+```bash
+git clone https://github.com/your-org/SO100_Control.git
+cd SO100_Control
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/yourusername/SO100_Control.git
-   cd SO100_Control
-   ```
+conda create -n so100 python=3.10 -y
+conda activate so100
 
-2. Create a new conda environment:
-   ```
-   conda create -n so100 python=3.10
-   conda activate so100
-   ```
-
-3. Install the package and its dependencies:
-   ```
-   pip install -e .
-   ```
-
-### Using Pip
-
-You can also install the package using pip:
-
-```
+pip install lerobot
+pip install "numpy<2"   # pybullet requires numpy 1.x
 pip install -e .
 ```
 
+---
 
-## Running the Controller
-
-To run the robot controller, use the main.py script:
+## Running — simulation (no hardware)
 
 ```bash
-python main.py --mode joystick  # For joystick control
-# or
-python main.py --mode keyboard  # For keyboard control
+# Joint control with keyboard
+python main.py --simulate --device keyboard
+
+# Cartesian control with keyboard
+python main.py --simulate --device keyboard --control-mode cartesian
+
+# Joystick (falls back to keyboard if none detected)
+python main.py --simulate
 ```
 
-## Configuration
+---
 
-### Robot Configuration
+## Running — real hardware
 
-The SO100 robot uses the RandyConfig class defined in `so100_robot_control/configs/configs.py`. Make sure to update the port configuration to match your hardware setup:
+### 1. Find your serial port
 
-```python
-@RobotConfig.register_subclass("randy")
-@dataclass
-class RandyConfig(ManipulatorRobotConfig):
-    calibration_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "randy")
-    max_relative_target: int | None = None
+```bash
+# macOS
+ls /dev/tty.usb*
 
-    follower_arms: dict[str, MotorsBusConfig] = field(
-        default_factory=lambda: {
-            "main": FeetechMotorsBusConfig(
-                port="/dev/YOUR_PORT_HERE",  # Update this to your port
-                motors={
-                    # name: (index, model)
-                    "shoulder_pan": [1, "sts3215"],
-                    "shoulder_lift": [2, "sts3215"],
-                    "elbow_flex": [3, "sts3215"],
-                    "wrist_flex": [4, "sts3215"],
-                    "wrist_roll": [5, "sts3215"],
-                    "gripper": [6, "sts3215"],
-                },
-            ),
-        }
-    )
-    # ... other config parameters ...
+# Linux
+ls /dev/ttyUSB* /dev/ttyACM*
 ```
 
-### Manipulator Modifications
+### 2. Create your robot config
 
-If you're using a custom robot configuration, you need to modify the `lerobot/common/robot_devices/robots/manipulator.py` file to add your robot type in three locations:
-
-1. In the `connect()` method where robot types are checked for torque mode:
-   ```python
-   if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
-       from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
-   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
-       from lerobot.common.robot_devices.motors.feetech import TorqueMode
-   ```
-
-2. In the `activate_calibration()` method:
-   ```python
-   if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
-       from lerobot.common.robot_devices.robots.dynamixel_calibration import run_arm_calibration
-       calibration = run_arm_calibration(arm, self.robot_type, name, arm_type)
-   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
-       from lerobot.common.robot_devices.robots.feetech_calibration import run_arm_manual_calibration
-       calibration = run_arm_manual_calibration(arm, self.robot_type, name, arm_type)
-   ```
-
-3. In the preset selection:
-   ```python
-   if self.robot_type in ["koch", "koch_bimanual"]:
-       self.set_koch_robot_preset()
-   elif self.robot_type == "aloha":
-       self.set_aloha_robot_preset()
-   elif self.robot_type in ["so100", "randy", "chatot", "moss", "lekiwi", "YOUR_ROBOT_TYPE"]:
-       self.set_so100_robot_preset()
-   ```
-
-### Calibration Files
-
-Make sure to create a calibration directory for your robot:
-
-```
-mkdir -p /Users/denizbekleyisseven/workspace/SO100_Control/so100_robot_control/configs/YOUR_CONFIG_NAME
+```bash
+cp robots/so100.example.yaml robots/so100.yaml
+# open robots/so100.yaml and set:  port: /dev/tty.usbmodemXXXXXX
 ```
 
-During the first run, calibration files will be generated in this directory. Subsequent runs will use these calibration files.
+### 3. Run
 
-## Dependencies
-
-- Python ≥ 3.10
-- NumPy ≥ 1.19.0
-- PyBullet ≥ 3.0.0
-- PyTorch ≥ 1.10.0
-- Pygame ≥ 2.6.0
-- Pyglet ≥ 2.1.0
-- Draccus ≥ 0.10.0
-- Feetech-servo-sdk ≥ 1.0.0
-- Gym ≥ 0.21.0 (for reinforcement learning applications)
-
-## Development
-
-Install development dependencies:
-
-```
-pip install -e ".[dev]"
+```bash
+python main.py --robot robots/so100.yaml --device keyboard
 ```
 
-Run tests:
+On first run the arm homes to a safe pose and waits until it arrives before handing control to you.
+
+### Calibration
+
+The bundled calibration (`so100_robot_control/configs/randy/so100.json`) was recorded on the reference hardware. If your arm behaves strangely (joints feel reversed or angles are off) run the interactive calibration once:
+
+```bash
+# in robots/so100.yaml, set:  calibrate: true
+python main.py --robot robots/so100.yaml --device keyboard
+# After calibration completes, set calibrate back to false
+```
+
+---
+
+## CLI reference
 
 ```
-pytest
+python main.py [options]
+
+  --robot PATH              YAML robot config (see robots/so100.example.yaml)
+  --device {joystick,keyboard}
+                            Input device (default: joystick; auto-falls back to keyboard)
+  --control-mode {joint,cartesian}
+                            Control mode (default: joint)
+  --simulate                Run in PyBullet simulation only (no hardware)
 ```
 
-Format code:
+Also available as an installed script:
+
+```bash
+so100-control --simulate --device keyboard
+```
+
+---
+
+## Controls
+
+### Keyboard
+
+| Key | Action |
+|---|---|
+| ↑ / ↓ | Move active joint / Cartesian axis |
+| ← / → | Base rotation (joint 0) |
+| `1`–`5` | Select active joint or Cartesian axis |
+| `G` | Toggle gripper open / closed |
+| `M` | Toggle upper / lower control mode |
+| `S` | Print current joint state |
+| `ESC` | Emergency stop |
+| `Q` | Quit |
+
+### Joystick
+
+| Input | Action |
+|---|---|
+| Y-axis | Move active joint / Cartesian axis |
+| X-axis | Base rotation |
+| Buttons 1–3 | Select active element |
+| Button 11 | Toggle upper/lower mode |
+| Button 5 | Print current state |
+| Button 10 | Emergency stop |
+
+---
+
+## Architecture
 
 ```
-black .
-isort .
+main.py
+  └── RobotController          controllers/combined_controller.py
+        ├── RobotInterface     robot_interface.py        ← lerobot 0.4 hardware driver
+        │     └── RobotKinematics  simulation/           ← symbolic FK / Jacobian IK
+        ├── KeyboardController / JoystickController      ← teleop input (updates target)
+        │     └── BaseController  base_controller.py
+        └── RobotSimulation    simulation/               ← PyBullet (--simulate only)
 ```
+
+**Control loop design** — input and motor commanding are fully decoupled:
+
+- The **input thread** (keyboard/joystick event loop) only updates `target_joint_angles`.
+- The **control thread** sends `target_joint_angles` to the motors **every tick at 30 Hz**, regardless of whether input changed. This gives smooth hold behaviour without relying on the motor's internal PID alone.
+
+---
+
+## Project layout
+
+```
+so100_robot_control/
+├── base_controller.py          Abstract controller base
+├── robot_interface.py          Hardware abstraction (lerobot 0.4 SOFollower)
+├── configs/
+│   ├── configs.py              SO100Config dataclass
+│   ├── robot_loader.py         YAML → config loader
+│   ├── randy/                  Bundled calibration files
+│   └── randy_urdf/             Bundled URDF + STL meshes
+├── controllers/
+│   └── combined_controller.py  RobotController orchestrator + CLI
+├── simulation/
+│   ├── robot_kinematics.py     Symbolic FK / Jacobian IK
+│   ├── robot_simulation.py     PyBullet visualisation
+│   └── joint_map.txt           Real ↔ sim angle reference
+└── teleop_devices/
+    ├── joystick_listener.py    Joystick input (pyglet)
+    └── keyboard_listener.py    Keyboard input (pygame)
+
+robots/
+└── so100.example.yaml          Robot config template (copy → so100.yaml)
+```
+
+---
+
+## Angle mapping (real ↔ sim)
+
+Hardware reports degrees (`real space`). The URDF / IK works in radians with a different sign convention (`sim space`).
+
+| Joint | real → sim |
+|---|---|
+| shoulder_pan  | `sim = -real_deg` |
+| shoulder_lift | `sim = -(real_deg - 90)` |
+| elbow_flex    | `sim = real_deg - 90` |
+| wrist_flex    | `sim = real_deg - 90` |
+| wrist_roll    | `sim = -(real_deg - 90)` |
+
+See `so100_robot_control/simulation/joint_map.txt` for the full reference table.
+
+---
 
 ## License
 
-[MIT License](LICENSE)
-
-## Contact
-
-For questions or support, please contact Deniz Bekleyis Seven at dseven1995@gmail.com.
+MIT

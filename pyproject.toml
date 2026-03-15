@@ -4,40 +4,49 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "so100_control"
-version = "0.1.0"
-description = "Control system for SO-ARM100 robot"
+version = "0.2.0"
+description = "Cartesian / joint teleoperation for the SO-ARM100 5-DOF robot arm"
 readme = "README.md"
+license = {text = "MIT"}
 authors = [
     {name = "Deniz Bekleyis Seven", email = "dseven1995@gmail.com"}
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
-    "numpy>=1.19.0",
-    "pybullet>=3.0.0",
-    "torch>=1.10.0",
-    # lerobot dependencies
-    "gym>=0.21.0",
-    "matplotlib>=3.3.0",
-    "opencv-python>=4.5.0",
-    "scipy>=1.7.0",
-    "pillow>=8.0.0",
-    "tqdm>=4.60.0",
+    # Core numeric / robotics
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "torch>=1.12",
+    "sympy>=1.11",
+    "yourdfpy>=0.0.53",
+    "pybullet>=3.2",
+    # Teleop input
+    "pyglet>=2.0",
+    "pygame>=2.1",
+    # YAML config loading
+    "pyyaml>=6.0",
+    # Robot hardware driver
+    "lerobot",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=6.0.0",
-    "black>=22.0.0",
-    "isort>=5.0.0",
-    "flake8>=4.0.0",
+    "pytest>=7.0",
+    "black>=23.0",
+    "isort>=5.0",
+    "flake8>=6.0",
 ]
 
-[tool.setuptools]
-packages = [ "so100_robot_control"]
+[project.scripts]
+so100-control = "so100_robot_control.controllers.combined_controller:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["so100_robot_control*"]
 
 [tool.black]
 line-length = 100
-target-version = ["py38"]
+target-version = ["py39"]
 
 [tool.isort]
 profile = "black"

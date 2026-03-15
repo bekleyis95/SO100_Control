@@ -1,259 +1,362 @@
-from so100_robot_control.simulation.robot_simulation import RobotSimulation
-from so100_robot_control.teleop_devices.joystick_listener import JoystickController
-from so100_robot_control.teleop_devices.keyboard_listener import KeyboardController
-from so100_robot_control.robot_interface import SO100RobotInterface
+"""
+RobotController — top-level orchestrator that wires together:
+  - hardware / mock robot interface
+  - FK / IK kinematics
+  - teleop input device (joystick or keyboard)
+  - optional PyBullet visualisation
+"""
+from __future__ import annotations
 
-class CombinedController:
+import enum
+import os
+import threading
+import time
+import argparse
+
+import numpy as np
+import torch
+
+from so100_robot_control.robot_interface import RobotInterface
+from so100_robot_control.simulation.robot_simulation import RobotSimulation
+from so100_robot_control.teleop_devices.joystick_listener import (
+    JointJoystickController,
+    CartesianJoystickController,
+)
+from so100_robot_control.teleop_devices.keyboard_listener import KeyboardController
+
+
+class ControlDevice(enum.Enum):
+    JOYSTICK = "joystick"
+    KEYBOARD = "keyboard"
+
+
+class ControlMode(enum.Enum):
+    CARTESIAN = "cartesian"
+    JOINT = "joint"
+
+
+# How often to re-sync joint state from hardware to correct dead-reckoning drift.
+# At 30 Hz this is a re-sync every ~333 ms.
+_RESYNC_EVERY_N_LOOPS = 10
+
+
+class RobotController:
     """
-    Wrapper class that allows choosing between joystick or keyboard control modes.
-    Sets up the robot SDK interface and passes control to the selected controller.
+    Orchestrates a robot control session.
+
+    Parameters
+    ----------
+    control_device : ControlDevice
+    control_mode   : ControlMode
+    simulate       : bool
+        When True, hardware connection is skipped and PyBullet is shown.
+    robot_config : SO100Config-compatible, optional
+        Passed through to RobotInterface.  Uses SO100Config() default if None.
+    control_rate   : float
+        Control loop frequency in Hz (default 30).
     """
-    def __init__(self, control_mode='joystick', simulate=False):
-        # Initialize the SDK interface
-        print("Initializing robot SDK interface...")
-        self.sdk = SO100RobotInterface()
-        
-        # Simulation mode flag
-        self.simulation_mode = simulate
-        if self.simulation_mode:
-            from so100_robot_control.simulation.robot_simulation import RobotSimulation
-            urdf_path = "SO-ARM100/URDF/SO_5DOF_ARM100_8j_URDF.SLDASM/urdf/SO_5DOF_ARM100_8j_URDF.SLDASM.urdf"
-            print("Initializing simulation instance...")
-            self.simulator = RobotSimulation(urdf_path)
-        
-        # Select and initialize the controller based on mode
+
+    def __init__(
+        self,
+        control_device: ControlDevice = ControlDevice.JOYSTICK,
+        control_mode: ControlMode = ControlMode.JOINT,
+        simulate: bool = False,
+        robot_config=None,
+        control_rate: float = 30.0,
+    ):
         self.control_mode = control_mode
-        if control_mode == 'joystick':
-            print("Initializing joystick controller...")
-            self.controller = JoystickController()
-            if self.controller.joystick is None:
-                print("No joystick found. Falling back to keyboard control.")
-                self.control_mode = 'keyboard'
-                self.controller = KeyboardController()
-        else:
-            print("Initializing keyboard controller...")
-            self.controller = KeyboardController()
-        
-        # Register callbacks
+        self.simulation_mode = simulate
+        self.control_rate = control_rate
+        self.control_interval = 1.0 / control_rate
+
+        # ── Robot interface ─────────────────────────────────────────────
+        print("Initialising robot interface...")
+        self.sdk = RobotInterface(config=robot_config, mock=simulate)
+
+        # ── Simulation visualisation ────────────────────────────────────
+        if simulate:
+            urdf_path = self.sdk.kinematics.urdf_path
+            print(f"Initialising PyBullet simulation (URDF: {urdf_path}) ...")
+            self.simulator = RobotSimulation(urdf_path)
+
+        # ── Teleop device ───────────────────────────────────────────────
+        self.control_device = control_device
+        self.controller = self._build_controller(control_device, control_mode)
+
+        # ── Callbacks ───────────────────────────────────────────────────
         self.controller.register_shutdown_callback(self.emergency_stop)
         self.controller.register_tensor_changed_callback(self.on_tensor_changed)
         self.controller.register_log_state_callback(self.get_robot_state)
-        
-        # Control settings
-        self.control_rate = 30.0  # 30Hz
-        self.control_interval = 1.0 / self.control_rate
-        
-        # Robot state tracking
+        # Simulation ticks run on the main thread so all PyBullet / OpenGL
+        # calls stay on the thread that owns the GL context (required on macOS).
+        if simulate:
+            self.controller.register_tick_callback(self._update_simulation)
+
+        # ── State ───────────────────────────────────────────────────────
         self.running = True
-        self.origin_position = None
-        self.current_position = None
-        self.maintaining_position = False
-        
-        # Start the control loop in a separate thread
-        self.control_thread = threading.Thread(target=self._control_loop)
-        self.control_thread.daemon = True
-        # Start controller interface in its own thread
-        self.controller_thread = None
-    
-    def _initialize_position(self):
-        """Get the initial robot position and set it as origin"""
+        # target_joint_angles is the desired position, updated by input and
+        # commanded to the robot every tick regardless of whether input changed.
+        self.target_joint_angles: torch.Tensor | None = None
+        self.current_tcp: np.ndarray | None = None
+        self._loop_count = 0
+
+        # Control thread is created here but started in start()
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+
+    # ------------------------------------------------------------------
+    # Teleop device factory
+    # ------------------------------------------------------------------
+
+    def _build_controller(self, device: ControlDevice, mode: ControlMode):
+        if device == ControlDevice.JOYSTICK:
+            print("Initialising joystick controller...")
+            ctrl = (JointJoystickController() if mode == ControlMode.JOINT
+                    else CartesianJoystickController())
+            if ctrl.joystick is None:
+                print("No joystick found — falling back to keyboard.")
+                self.control_device = ControlDevice.KEYBOARD
+                return KeyboardController()
+            return ctrl
+        print("Initialising keyboard controller...")
+        return KeyboardController()
+
+    # ------------------------------------------------------------------
+    # Control loop
+    # ------------------------------------------------------------------
+
+    def _initialize_position(self) -> bool:
         try:
-            # Get initial observation
-            observation = self.sdk.robot.capture_observation()["observation.state"]
-            self.origin_position = observation.clone()
-            self.current_position = observation.clone()
-            print(f"Initial position set: {self.origin_position}")
+            angles, tcp = self.sdk.get_observation()
+            self.target_joint_angles = angles.clone()
+            self.current_tcp = tcp
+            print(f"Initial joint angles: {self.target_joint_angles}")
             return True
         except Exception as e:
-            print(f"Error initializing position: {e}")
+            print(f"Error initialising position: {e}")
             return False
-    
+
+    def _resync_from_hardware(self):
+        """Periodically read TCP from hardware for IK state tracking.
+
+        Only updates current_tcp (used as IK initial guess in Cartesian mode).
+        target_joint_angles is intentionally NOT snapped to hardware — the
+        control loop always commands the target, so snapping it would cause a
+        jerk whenever the re-sync fires.
+        """
+        try:
+            _, self.current_tcp = self.sdk.get_observation()
+        except Exception as e:
+            print(f"Re-sync warning: {e}")
+
     def _control_loop(self):
-        """Main control loop that runs at the specified rate"""
-        # Initialize position reference
         if not self._initialize_position():
-            print("Failed to initialize position, stopping controller")
+            print("Failed to initialise position — stopping.")
             self.running = False
             return
-        
+
         while self.running:
             try:
-                # Get start time for rate control
-                loop_start_time = time.time()
-                
-                # Get the current control tensor
-                current_tensor = self.controller.get_control_tensor()
-                
+                t0 = time.time()
+                self._loop_count += 1
+
+                # Input updates the target — decoupled from commanding.
+                cmd = self.controller.get_control_tensor()
+                if not torch.all(cmd == 0):
+                    try:
+                        if self.control_mode == ControlMode.CARTESIAN:
+                            self._apply_cartesian_command(cmd)
+                        else:
+                            self._apply_joint_command(cmd)
+                    except Exception as e:
+                        print(f"Command error: {e}")
+
+                # Always send the current target to the robot every tick.
+                # This eliminates jerk caused by gaps in commanding: the motor
+                # continuously receives its goal position even when no input is
+                # active, giving smooth hold behaviour without relying solely on
+                # the motor's internal PID.
                 try:
-                    # Update position with control tensor
-                    if not torch.all(current_tensor == 0):
-                        self.current_position = self.current_position + current_tensor
-                        # Clip joint positions to limits:
-                        min_limits = torch.tensor([-110, -20, -20, -110, -110, -10], device=self.current_position.device)
-                        max_limits = torch.tensor([110, 200, 200, 110, 110, 110], device=self.current_position.device)
-                        #self.current_position = torch.max(torch.min(self.current_position, max_limits), min_limits)
-                        self.maintaining_position = False
-                    
-                    # Send the current target position to the robot
-                    self.sdk.send_joint_positions(self.current_position)
-                    
-                    # Only print status message once when transitioning to idle
-                    if torch.all(current_tensor == 0):
-                        if not self.maintaining_position:
-                            print("Maintaining current position")
-                            self.maintaining_position = True
-                    else:
-                        print(f"New position: {self.current_position}")
-                        
+                    self.sdk.send_action(self.target_joint_angles)
                 except Exception as e:
-                    print(f"Error updating robot position: {e}")
-                
-                # Maintain control rate
-                elapsed_time = time.time() - loop_start_time
-                sleep_time = max(0.0, self.control_interval - elapsed_time)
+                    print(f"Send action error: {e}")
+
+                # Periodic TCP re-sync for IK state (real hardware only).
+                if not self.simulation_mode and self._loop_count % _RESYNC_EVERY_N_LOOPS == 0:
+                    self._resync_from_hardware()
+
+                # Rate limiting
+                elapsed = time.time() - t0
+                sleep_time = self.control_interval - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 else:
-                    print(f"Warning: Control loop running slower than {self.control_rate}Hz")
-                    
+                    print(f"Warning: loop running slower than {self.control_rate:.0f} Hz")
+
             except Exception as e:
-                print(f"Error in control loop: {e}")
-                time.sleep(0.1)  # Still try to maintain timing even with errors
-    
-    def on_tensor_changed(self, tensor):
-        """Callback function when the control tensor changes"""
-        # This will be called by the controller when the tensor changes
-        # We don't need to do anything here as the control loop handles the update
-        pass
-    
-    def emergency_stop(self):
-        """Emergency stop function triggered by controllers"""
-        print("EMERGENCY STOP ACTIVATED")
-        
-        # Set running to false to stop the control loop
-        self.running = False
-        
+                print(f"Outer control loop error: {e}")
+                time.sleep(0.1)
+
+    def _apply_joint_command(self, cmd: torch.Tensor):
+        """Update joint target by delta. Actual send happens in the main tick."""
+        self.target_joint_angles = self.target_joint_angles + cmd
+
+    def _apply_cartesian_command(self, cmd: torch.Tensor):
+        """
+        Update joint target via IK. Actual send happens in the main tick.
+
+        cmd[:3] is a Cartesian position delta (metres); gripper is preserved.
+        """
+        delta_xyz = cmd[:3].numpy()
+        target_tcp = self.current_tcp + delta_xyz
+
+        target_sim = self.sdk.kinematics.ik(
+            target_tcp,
+            initial_guess=self.target_joint_angles.numpy(),
+            real_robot=True,
+        )
+        target_real_5 = self.sdk.kinematics.sim_to_real(target_sim)
+        gripper = float(self.target_joint_angles[5])
+        self.target_joint_angles = torch.tensor(
+            np.append(target_real_5, gripper), dtype=torch.float32
+        )
+        self.current_tcp = target_tcp
+
+    # ------------------------------------------------------------------
+    # Simulation visualisation update
+    # Called from the control thread so it works with both pyglet (joystick)
+    # and pygame (keyboard) main-thread event loops.
+    # ------------------------------------------------------------------
+
+    def _update_simulation(self):
+        if self.target_joint_angles is None:
+            return
         try:
-            # Check if the robot is still connected before trying to control it
-            if hasattr(self.sdk, 'robot') and hasattr(self.sdk.robot, 'is_connected') and self.sdk.robot.is_connected:
-                # Try to stop the robot immediately
-                try:
-                    # Call stop_robot to ensure proper shutdown
-                    self.sdk.stop_robot()
-                    print("Robot stopped successfully")
-                except Exception as e:
-                    print(f"Error stopping robot: {e}")
-            else:
-                print("Robot already disconnected or not properly initialized")
+            # Convert real-space → sim-space degrees for PyBullet
+            sim_rad = self.sdk.kinematics.real_to_sim(self.target_joint_angles.numpy())
+            sim_deg = np.degrees(sim_rad)                          # 5-D
+            gripper_deg = float(self.target_joint_angles[5])
+            full_deg = np.append(sim_deg, gripper_deg).tolist()    # 6-D
+
+            self.simulator.set_joint_states(full_deg)
+            self.simulator.step_simulation()
+        except Exception as e:
+            print(f"Simulation update error: {e}")
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def on_tensor_changed(self, tensor):
+        pass  # control loop polls the tensor — nothing to do here
+
+    def emergency_stop(self):
+        print("EMERGENCY STOP ACTIVATED")
+        self.running = False
+        try:
+            if (hasattr(self.sdk, "robot") and
+                    hasattr(self.sdk.robot, "is_connected") and
+                    self.sdk.robot.is_connected):
+                self.sdk.stop_robot()
+                print("Robot stopped.")
         except Exception as e:
             print(f"Error during emergency stop: {e}")
-        
-        print("Exiting program due to emergency stop")
-        import os
         os._exit(0)
 
     def get_robot_state(self):
-        """Get the current state of the robot"""
         try:
-            # Capture the current observation from the robot
-            observation = self.sdk.robot.capture_observation()["observation.state"]
-            
-            print(f"Current robot state: {observation}")
-            return observation
+            obs = self.sdk.get_observation()
+            print(f"Robot state: {obs}")
+            return obs
         except Exception as e:
             print(f"Error getting robot state: {e}")
             return None
-    
-    def reset_to_origin(self):
-        """Reset the robot position to the original starting position"""
-        if self.origin_position is not None:
-            try:
-                # Reset our tracked position to the origin
-                self.current_position = self.origin_position.clone()
-                # Send the reset command to the robot
-                self.sdk.send_joint_positions(self.current_position)
-                print("Reset to origin position")
-            except Exception as e:
-                print(f"Error resetting to origin: {e}")
-    
-    def _update_simulation(self):
-        # This function is scheduled in pyglet's event loop
-        if self.simulation_mode and self.current_position is not None:
-            try:
-                self.simulator.set_joint_states(RobotSimulation.real_to_sim(self.current_position).tolist())
-                self.simulator.step_simulation()
-                # Print TCP pose in simulation mode
-                self.latest_tcp_pose = self.simulator.get_tcp_pose()
-                print(f"TCP Pose in simulation: {self.latest_tcp_pose}")
-            except Exception as e:
-                print(f"Error in simulation update: {e}")
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def start(self):
-        print(f"Starting Combined Robot Controller (Control rate: {self.control_rate}Hz)")
-        print(f"Control mode: {self.control_mode}")
-        print("Press Ctrl+C to stop")
-        
+        print(f"Starting RobotController  rate={self.control_rate:.0f}Hz  "
+              f"device={self.control_device.value}  mode={self.control_mode.value}")
+
         try:
             if self.simulation_mode:
-                print("Initializing simulation on main thread...")
+                # Init PyBullet before starting the control thread so the
+                # physics server is ready when _update_simulation first runs.
                 self.simulator.init_simulation()
-                import pyglet.clock
-                # Schedule simulation update via pyglet; this runs in the main thread
-                pyglet.clock.schedule_interval(lambda dt: self._update_simulation(), self.control_interval)
-            
-            # Start control thread (non-blocking)
+
             self.control_thread.start()
-            
-            # Run controller interface on main thread (pyglet.app.run is called inside)
-            self.controller.run()  # This will block in the main thread
-            
+            self.controller.run()   # blocks on main thread (pyglet / pygame event loop)
+
         except KeyboardInterrupt:
-            print("\nStopping controller due to keyboard interrupt")
+            print("\nStopping due to keyboard interrupt")
             self.stop()
         except Exception as e:
-            print(f"Error starting controller: {e}")
+            print(f"Error in start(): {e}")
             self.stop()
-    
+
     def stop(self):
-        """Stop the robot controller and release resources"""
-        print("Stopping Robot Controller")
+        print("Stopping RobotController")
         self.running = False
-        
         try:
-            # Reset to origin position if possible
-            if self.origin_position is not None:
-                self.sdk.send_joint_positions(self.origin_position)
-                print("Reset to origin position before stopping")
-            
-            # Stop the robot explicitly
             self.sdk.stop_robot()
-            
-            # If simulation mode is enabled, stop the simulation thread and disconnect simulation
-            if self.simulation_mode:
+        except Exception as e:
+            print(f"Error stopping robot: {e}")
+        # Only disconnect PyBullet if init_simulation() was actually called.
+        # If the URDF failed to load, self.simulator exists but the physics
+        # server was never started — calling p.disconnect() would raise.
+        if self.simulation_mode and hasattr(self, "simulator") and self.simulator.robot is not None:
+            try:
                 import pybullet as p
                 p.disconnect()
-        except Exception as e:
-            print(f"Error during shutdown: {e}")
-        
-        # Wait for control thread to finish
+            except Exception:
+                pass
         if self.control_thread.is_alive():
-            self.control_thread.join(timeout=1.0)
-        if self.controller_thread and self.controller_thread.is_alive():
-            self.controller_thread.join(timeout=1.0)
+            self.control_thread.join(timeout=2.0)
 
+
+# Backward-compatible alias
+CombinedController = RobotController
+
+
+# ------------------------------------------------------------------
+# CLI entry point
+# ------------------------------------------------------------------
 
 def main():
-    """Main entry point for the combined controller"""
-    parser = argparse.ArgumentParser(description='SO100 Robot Controller')
-    parser.add_argument('--mode', type=str, default='joystick', 
-                        choices=['joystick', 'keyboard'],
-                        help='Control mode: joystick or keyboard (default: joystick)')
-    parser.add_argument('--simulate', action='store_true',
-                        help='Enable simulation mode instead of using real robot')
+    parser = argparse.ArgumentParser(description="SO-100 Robot Controller")
+    parser.add_argument(
+        "--device", type=str, default="joystick",
+        choices=[e.value for e in ControlDevice],
+        help="Input device: joystick or keyboard (default: joystick)",
+    )
+    parser.add_argument(
+        "--control-mode", type=str, default="joint",
+        choices=[e.value for e in ControlMode],
+        help="Control mode: joint or cartesian (default: joint)",
+    )
+    parser.add_argument(
+        "--simulate", action="store_true",
+        help="Skip hardware — run in PyBullet simulation only",
+    )
+    parser.add_argument(
+        "--robot", type=str, default=None,
+        help="Path to a YAML robot config file (see robots/so100.example.yaml)",
+    )
     args = parser.parse_args()
-    
-    controller = CombinedController(control_mode=args.mode, simulate=args.simulate)
-    
+
+    robot_config = None
+    if args.robot:
+        from so100_robot_control.configs.robot_loader import load_robot_config
+        robot_config = load_robot_config(args.robot)
+
+    controller = RobotController(
+        control_device=ControlDevice(args.device),
+        control_mode=ControlMode(args.control_mode),
+        simulate=args.simulate,
+        robot_config=robot_config,
+    )
+
     try:
         controller.start()
     except KeyboardInterrupt:
