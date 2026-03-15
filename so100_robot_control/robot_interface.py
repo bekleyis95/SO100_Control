@@ -45,9 +45,9 @@ class RobotInterface:
         if config is None:
             config = SO100Config()
 
-        # In mock/simulate mode the hardware robot is never used.
+        # In mock/simulate mode the hardware driver is never used.
         if mock:
-            self.robot = None
+            self.driver = None
         else:
             # Build lerobot 0.4+ SOFollowerRobotConfig from our SO100Config.
             lerobot_cfg = SOFollowerRobotConfig(
@@ -58,21 +58,28 @@ class RobotInterface:
                 use_degrees=config.use_degrees,
                 cameras=config.cameras,
             )
-            self.robot = SOFollower(lerobot_cfg)
+            self.driver = SOFollower(lerobot_cfg)
         self._calibrate = getattr(config, "calibrate", False)
 
         self.kinematics = RobotKinematics(urdf_path=config.urdf_path)
 
-        # Initialise state placeholders
-        self.joint_angles = torch.zeros(6)
+        # Home pose — shared by both hardware (blocking move) and mock mode.
+        self._home = torch.tensor([-49.4835, 77.2088, 74.0110, -42.0110, -89.0440, 18.2287])
+
+        # Initialise state to the home pose so simulation starts there.
+        self.joint_angles = self._home.clone()
         self.tcp = np.zeros(3)
 
         if not mock:
             self._connect_and_home()
+        else:
+            # In mock mode pre-compute the TCP for the home pose so IK has a
+            # sensible initial guess from the very first tick.
+            self.tcp, _ = self.kinematics.fk(self.joint_angles, real_robot=True)
 
     def _connect_and_home(self):
         """Connect to hardware and move to home, blocking until arrival."""
-        self.robot.connect(calibrate=self._calibrate)
+        self.driver.connect(calibrate=self._calibrate)
         initial_angles, _ = self.get_observation()
 
         if initial_angles[1] < 0.0:
@@ -81,7 +88,7 @@ class RobotInterface:
                 "Rotate the arm past the singularity before starting."
             )
 
-        home = torch.tensor([-24.1209, 148.2198, -27.4725, -137.5385, 40.2198, 18.4867])
+        home = self._home
         self.send_action(home)
 
         # Block until every joint is within tolerance of the home pose so the
@@ -114,7 +121,7 @@ class RobotInterface:
         if self.mock:
             return self.joint_angles, self.tcp
 
-        obs = self.robot.get_observation()
+        obs = self.driver.get_observation()
         if obs is None:
             self.logger.error("Failed to capture observation.")
             return self.joint_angles, self.tcp
@@ -134,7 +141,7 @@ class RobotInterface:
                 f"{name}.pos": float(action[i])
                 for i, name in enumerate(_JOINT_NAMES)
             }
-            self.robot.send_action(action_dict)
+            self.driver.send_action(action_dict)
         self.joint_angles = action
 
     def grasp(self, close: bool):
@@ -146,7 +153,7 @@ class RobotInterface:
     def stop_robot(self):
         """Disconnect from hardware (no-op in mock mode)."""
         if not self.mock:
-            self.robot.disconnect()
+            self.driver.disconnect()
         self.logger.info("Robot disconnected.")
 
     # ------------------------------------------------------------------

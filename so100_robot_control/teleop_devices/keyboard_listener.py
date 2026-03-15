@@ -4,10 +4,10 @@ import pygame
 import time
 import threading
 import torch
-from so100_robot_control.base_controller import BaseController
+from so100_robot_control.teleop_devices.base_teleop_device import BaseTeleopDevice
 
 
-class KeyboardController(BaseController):
+class KeyboardController(BaseTeleopDevice):
     def __init__(self):
         super().__init__()
 

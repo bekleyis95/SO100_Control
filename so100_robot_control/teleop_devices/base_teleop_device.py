@@ -1,31 +1,28 @@
 import torch
 from abc import ABC, abstractmethod
 
-class BaseController(ABC):
+
+class BaseTeleopDevice(ABC):
     """
-    Abstract base class for robot controllers.
-    Defines common functionality for both joystick and keyboard controllers.
+    Abstract base class for teleoperation input devices (keyboard, joystick).
+
+    Subclasses implement the device-specific event loop in ``run()`` and
+    translate raw hardware events into a 6-D control tensor that the
+    TeleopSession control loop reads every tick.
     """
+
     def __init__(self):
-        # Control mode (lower or upper)
-        self.mode = "lower"  # Start with lower control mode
-        
-        # Store the current active element (defaults to 1)
+        self.mode = "lower"
         self.current_element = 1
-        
-        # Control coefficient (magnitude of change)
         self.coefficient = 1.0
-        
-        # Add a small deadzone to prevent drift
         self.deadzone = 0.05
-        
-        # Initialize the 6-dimensional tensor with zeros
+
+        # 6-D tensor: each element maps to one robot joint
         self.control_tensor = torch.zeros(6)
-        
-        # Debug variables
+
         self.debug_mode = True
-        
-        # Add callbacks
+
+        # Callbacks registered by TeleopSession
         self.tensor_changed_callback = None
         self.shutdown_callback = None
         self.log_state_callback = None
@@ -33,58 +30,43 @@ class BaseController(ABC):
         # visualisation so all PyBullet calls stay on the main thread (required
         # on macOS where the OpenGL context is thread-affine).
         self.tick_callback = None
-    
+
     def _print_tensor_state(self):
-        """Print the current state of the control tensor in a clear format"""
         tensor_values = [f"{val:.1f}" for val in self.control_tensor]
         print(f"Mode: {self.mode}, Active Element: {self.current_element}")
         print(f"Control tensor: [{', '.join(tensor_values)}]")
-        
         if self.debug_mode:
-            # Print the actual tensor object for detailed inspection
             print(f"Raw tensor: {self.control_tensor}")
-    
+
     def get_control_tensor(self):
-        """Return the current control tensor"""
+        """Return the current control tensor."""
         return self.control_tensor
-    
+
     def register_tensor_changed_callback(self, callback):
-        """
-        Register a callback function that will be called whenever the tensor changes.
-        """
         self.tensor_changed_callback = callback
-    
+
     def register_shutdown_callback(self, callback):
-        """
-        Register a callback function that will be called when shutdown is requested.
-        """
         self.shutdown_callback = callback
-    
+
     def register_log_state_callback(self, callback):
-        """
-        Register a callback function that will be called to log the current state.
-        """
         self.log_state_callback = callback
 
     def register_tick_callback(self, callback):
-        """Register a callback called once per frame on the main thread."""
+        """Register a callback invoked once per frame on the main thread."""
         self.tick_callback = callback
 
     def _change_control_element(self, element_idx):
-        """Change which element is being controlled"""
-        if 0 <= element_idx <= 5:  # Valid range for control tensor
+        if 0 <= element_idx <= 5:
             self.current_element = element_idx
             print(f"Now controlling element {element_idx}")
             self._print_tensor_state()
-    
+
     def _toggle_mode(self):
-        """Toggle between upper and lower control modes"""
         self.mode = "upper" if self.mode == "lower" else "lower"
         print(f"Switched to {self.mode} control mode")
         self._print_tensor_state()
-    
+
     def _trigger_shutdown(self):
-        """Trigger emergency shutdown through callback"""
         print("EMERGENCY STOP TRIGGERED")
         if self.shutdown_callback:
             try:
@@ -97,25 +79,23 @@ class BaseController(ABC):
             print("No shutdown callback registered")
             import os
             os._exit(0)
-    
+
     def _trigger_log_state(self):
-        """Log the current state of the control tensor"""
         if self.log_state_callback:
             try:
                 self.log_state_callback()
             except Exception as e:
                 print(f"Error in log state callback: {e}")
-    
+
     @abstractmethod
     def _apply_axis_change(self, axis_name, value):
-        raise NotImplementedError("This method should be implemented by subclasses")
-    
-    # Modified signature to accept one parameter 'button'
+        raise NotImplementedError
+
     @abstractmethod
     def _apply_button_press(self, button):
-        raise NotImplementedError("This method should be implemented by subclasses")
-    
+        raise NotImplementedError
+
     @abstractmethod
     def run(self):
-        """Start the controller event loop - must be implemented by subclasses"""
+        """Start the device event loop (blocks until stopped)."""
         pass

@@ -12,7 +12,7 @@ python main.py --device keyboard --control-mode cartesian --simulate
 # Custom robot config (port, motors, URDF from a YAML file)
 python main.py --robot robots/so100.yaml
 """
-from so100_robot_control.controllers.combined_controller import main
+from so100_robot_control.controllers.teleop_session import main
 
 if __name__ == "__main__":
     main()

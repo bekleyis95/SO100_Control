@@ -129,17 +129,17 @@ so100-control --simulate --device keyboard
 
 ```
 main.py
-  └── RobotController          controllers/combined_controller.py
+  └── TeleopSession            controllers/teleop_session.py
         ├── RobotInterface     robot_interface.py        ← lerobot 0.4 hardware driver
         │     └── RobotKinematics  simulation/           ← symbolic FK / Jacobian IK
         ├── KeyboardController / JoystickController      ← teleop input (updates target)
-        │     └── BaseController  base_controller.py
+        │     └── BaseTeleopDevice  teleop_devices/base_teleop_device.py
         └── RobotSimulation    simulation/               ← PyBullet (--simulate only)
 ```
 
 **Control loop design** — input and motor commanding are fully decoupled:
 
-- The **input thread** (keyboard/joystick event loop) only updates `target_joint_angles`.
+- The **input device** (keyboard/joystick event loop, main thread) only updates `target_joint_angles`.
 - The **control thread** sends `target_joint_angles` to the motors **every tick at 30 Hz**, regardless of whether input changed. This gives smooth hold behaviour without relying on the motor's internal PID alone.
 
 ---
@@ -148,7 +148,6 @@ main.py
 
 ```
 so100_robot_control/
-├── base_controller.py          Abstract controller base
 ├── robot_interface.py          Hardware abstraction (lerobot 0.4 SOFollower)
 ├── configs/
 │   ├── configs.py              SO100Config dataclass
@@ -156,12 +155,13 @@ so100_robot_control/
 │   ├── randy/                  Bundled calibration files
 │   └── randy_urdf/             Bundled URDF + STL meshes
 ├── controllers/
-│   └── combined_controller.py  RobotController orchestrator + CLI
+│   └── teleop_session.py       TeleopSession orchestrator + CLI entry point
 ├── simulation/
 │   ├── robot_kinematics.py     Symbolic FK / Jacobian IK
 │   ├── robot_simulation.py     PyBullet visualisation
 │   └── joint_map.txt           Real ↔ sim angle reference
 └── teleop_devices/
+    ├── base_teleop_device.py   BaseTeleopDevice abstract base
     ├── joystick_listener.py    Joystick input (pyglet)
     └── keyboard_listener.py    Keyboard input (pygame)
 

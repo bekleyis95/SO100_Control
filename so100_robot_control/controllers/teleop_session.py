@@ -1,17 +1,30 @@
 """
-RobotController — top-level orchestrator that wires together:
-  - hardware / mock robot interface
-  - FK / IK kinematics
-  - teleop input device (joystick or keyboard)
-  - optional PyBullet visualisation
+TeleopSession — top-level orchestrator for a teleoperation session.
+
+Wires together:
+  - RobotInterface  (hardware abstraction / mock)
+  - RobotKinematics (FK / IK — embedded in RobotInterface)
+  - a BaseTeleopDevice (keyboard or joystick)
+  - RobotSimulation (optional PyBullet visualisation)
+
+The input device and motor commanding are fully decoupled:
+  - The input device event loop (main thread) only updates target_joint_angles.
+  - The control thread sends target_joint_angles to the motors at a fixed rate
+    (default 30 Hz) regardless of whether the target changed, giving smooth
+    hold behaviour without relying solely on the motor's internal PID.
+
+Control modes are implemented as subclasses of TeleopSession:
+  - JointTeleopSession      — joint-space teleoperation
+  - CartesianTeleopSession  — Cartesian-space teleoperation via IK
 """
 from __future__ import annotations
 
+import abc
+import argparse
 import enum
 import os
 import threading
 import time
-import argparse
 
 import numpy as np
 import torch
@@ -19,8 +32,8 @@ import torch
 from so100_robot_control.robot_interface import RobotInterface
 from so100_robot_control.simulation.robot_simulation import RobotSimulation
 from so100_robot_control.teleop_devices.joystick_listener import (
-    JointJoystickController,
     CartesianJoystickController,
+    JointJoystickController,
 )
 from so100_robot_control.teleop_devices.keyboard_listener import KeyboardController
 
@@ -35,19 +48,22 @@ class ControlMode(enum.Enum):
     JOINT = "joint"
 
 
-# How often to re-sync joint state from hardware to correct dead-reckoning drift.
-# At 30 Hz this is a re-sync every ~333 ms.
+# How often to re-sync TCP from hardware for IK state tracking.
+# At 30 Hz control rate this fires every ~333 ms.
 _RESYNC_EVERY_N_LOOPS = 10
 
 
-class RobotController:
+class TeleopSession(abc.ABC):
     """
-    Orchestrates a robot control session.
+    Abstract orchestrator for a teleoperation session.
+
+    Subclasses implement the command strategy by overriding `_apply_command`
+    and `_build_joystick_device`, removing the need for mode branching in
+    the shared control loop.
 
     Parameters
     ----------
     control_device : ControlDevice
-    control_mode   : ControlMode
     simulate       : bool
         When True, hardware connection is skipped and PyBullet is shown.
     robot_config : SO100Config-compatible, optional
@@ -59,38 +75,36 @@ class RobotController:
     def __init__(
         self,
         control_device: ControlDevice = ControlDevice.JOYSTICK,
-        control_mode: ControlMode = ControlMode.JOINT,
         simulate: bool = False,
         robot_config=None,
         control_rate: float = 30.0,
     ):
-        self.control_mode = control_mode
         self.simulation_mode = simulate
         self.control_rate = control_rate
         self.control_interval = 1.0 / control_rate
 
         # ── Robot interface ─────────────────────────────────────────────
         print("Initialising robot interface...")
-        self.sdk = RobotInterface(config=robot_config, mock=simulate)
+        self.robot = RobotInterface(config=robot_config, mock=simulate)
 
         # ── Simulation visualisation ────────────────────────────────────
         if simulate:
-            urdf_path = self.sdk.kinematics.urdf_path
+            urdf_path = self.robot.kinematics.urdf_path
             print(f"Initialising PyBullet simulation (URDF: {urdf_path}) ...")
             self.simulator = RobotSimulation(urdf_path)
 
-        # ── Teleop device ───────────────────────────────────────────────
+        # ── Teleop input device ──────────────────────────────────────────
         self.control_device = control_device
-        self.controller = self._build_controller(control_device, control_mode)
+        self.input_device = self._build_input_device(control_device)
 
         # ── Callbacks ───────────────────────────────────────────────────
-        self.controller.register_shutdown_callback(self.emergency_stop)
-        self.controller.register_tensor_changed_callback(self.on_tensor_changed)
-        self.controller.register_log_state_callback(self.get_robot_state)
+        self.input_device.register_shutdown_callback(self.emergency_stop)
+        self.input_device.register_tensor_changed_callback(self.on_tensor_changed)
+        self.input_device.register_log_state_callback(self.get_robot_state)
         # Simulation ticks run on the main thread so all PyBullet / OpenGL
         # calls stay on the thread that owns the GL context (required on macOS).
         if simulate:
-            self.controller.register_tick_callback(self._update_simulation)
+            self.input_device.register_tick_callback(self._update_simulation)
 
         # ── State ───────────────────────────────────────────────────────
         self.running = True
@@ -104,20 +118,31 @@ class RobotController:
         self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
 
     # ------------------------------------------------------------------
-    # Teleop device factory
+    # Abstract interface — subclasses define per-mode behaviour
     # ------------------------------------------------------------------
 
-    def _build_controller(self, device: ControlDevice, mode: ControlMode):
+    @abc.abstractmethod
+    def _apply_command(self, cmd: torch.Tensor) -> None:
+        """Apply a non-zero command tensor to update target_joint_angles."""
+
+    @abc.abstractmethod
+    def _build_joystick_device(self):
+        """Return the mode-appropriate joystick controller."""
+
+    # ------------------------------------------------------------------
+    # Input device factory
+    # ------------------------------------------------------------------
+
+    def _build_input_device(self, device: ControlDevice):
         if device == ControlDevice.JOYSTICK:
-            print("Initialising joystick controller...")
-            ctrl = (JointJoystickController() if mode == ControlMode.JOINT
-                    else CartesianJoystickController())
+            print("Initialising joystick...")
+            ctrl = self._build_joystick_device()
             if ctrl.joystick is None:
                 print("No joystick found — falling back to keyboard.")
                 self.control_device = ControlDevice.KEYBOARD
                 return KeyboardController()
             return ctrl
-        print("Initialising keyboard controller...")
+        print("Initialising keyboard...")
         return KeyboardController()
 
     # ------------------------------------------------------------------
@@ -126,7 +151,7 @@ class RobotController:
 
     def _initialize_position(self) -> bool:
         try:
-            angles, tcp = self.sdk.get_observation()
+            angles, tcp = self.robot.get_observation()
             self.target_joint_angles = angles.clone()
             self.current_tcp = tcp
             print(f"Initial joint angles: {self.target_joint_angles}")
@@ -136,7 +161,7 @@ class RobotController:
             return False
 
     def _resync_from_hardware(self):
-        """Periodically read TCP from hardware for IK state tracking.
+        """Read TCP from hardware for IK state tracking.
 
         Only updates current_tcp (used as IK initial guess in Cartesian mode).
         target_joint_angles is intentionally NOT snapped to hardware — the
@@ -144,7 +169,7 @@ class RobotController:
         jerk whenever the re-sync fires.
         """
         try:
-            _, self.current_tcp = self.sdk.get_observation()
+            _, self.current_tcp = self.robot.get_observation()
         except Exception as e:
             print(f"Re-sync warning: {e}")
 
@@ -160,13 +185,10 @@ class RobotController:
                 self._loop_count += 1
 
                 # Input updates the target — decoupled from commanding.
-                cmd = self.controller.get_control_tensor()
+                cmd = self.input_device.get_control_tensor()
                 if not torch.all(cmd == 0):
                     try:
-                        if self.control_mode == ControlMode.CARTESIAN:
-                            self._apply_cartesian_command(cmd)
-                        else:
-                            self._apply_joint_command(cmd)
+                        self._apply_command(cmd)
                     except Exception as e:
                         print(f"Command error: {e}")
 
@@ -176,7 +198,7 @@ class RobotController:
                 # active, giving smooth hold behaviour without relying solely on
                 # the motor's internal PID.
                 try:
-                    self.sdk.send_action(self.target_joint_angles)
+                    self.robot.send_action(self.target_joint_angles)
                 except Exception as e:
                     print(f"Send action error: {e}")
 
@@ -196,47 +218,20 @@ class RobotController:
                 print(f"Outer control loop error: {e}")
                 time.sleep(0.1)
 
-    def _apply_joint_command(self, cmd: torch.Tensor):
-        """Update joint target by delta. Actual send happens in the main tick."""
-        self.target_joint_angles = self.target_joint_angles + cmd
-
-    def _apply_cartesian_command(self, cmd: torch.Tensor):
-        """
-        Update joint target via IK. Actual send happens in the main tick.
-
-        cmd[:3] is a Cartesian position delta (metres); gripper is preserved.
-        """
-        delta_xyz = cmd[:3].numpy()
-        target_tcp = self.current_tcp + delta_xyz
-
-        target_sim = self.sdk.kinematics.ik(
-            target_tcp,
-            initial_guess=self.target_joint_angles.numpy(),
-            real_robot=True,
-        )
-        target_real_5 = self.sdk.kinematics.sim_to_real(target_sim)
-        gripper = float(self.target_joint_angles[5])
-        self.target_joint_angles = torch.tensor(
-            np.append(target_real_5, gripper), dtype=torch.float32
-        )
-        self.current_tcp = target_tcp
-
     # ------------------------------------------------------------------
-    # Simulation visualisation update
-    # Called from the control thread so it works with both pyglet (joystick)
-    # and pygame (keyboard) main-thread event loops.
+    # Simulation visualisation
+    # Invoked via tick_callback on the main thread so all PyBullet / OpenGL
+    # calls stay on the thread that owns the GL context (macOS requirement).
     # ------------------------------------------------------------------
 
     def _update_simulation(self):
         if self.target_joint_angles is None:
             return
         try:
-            # Convert real-space → sim-space degrees for PyBullet
-            sim_rad = self.sdk.kinematics.real_to_sim(self.target_joint_angles.numpy())
+            sim_rad = self.robot.kinematics.real_to_sim(self.target_joint_angles.numpy())
             sim_deg = np.degrees(sim_rad)                          # 5-D
             gripper_deg = float(self.target_joint_angles[5])
             full_deg = np.append(sim_deg, gripper_deg).tolist()    # 6-D
-
             self.simulator.set_joint_states(full_deg)
             self.simulator.step_simulation()
         except Exception as e:
@@ -253,10 +248,10 @@ class RobotController:
         print("EMERGENCY STOP ACTIVATED")
         self.running = False
         try:
-            if (hasattr(self.sdk, "robot") and
-                    hasattr(self.sdk.robot, "is_connected") and
-                    self.sdk.robot.is_connected):
-                self.sdk.stop_robot()
+            if (hasattr(self.robot, "driver") and
+                    hasattr(self.robot.driver, "is_connected") and
+                    self.robot.driver.is_connected):
+                self.robot.stop_robot()
                 print("Robot stopped.")
         except Exception as e:
             print(f"Error during emergency stop: {e}")
@@ -264,7 +259,7 @@ class RobotController:
 
     def get_robot_state(self):
         try:
-            obs = self.sdk.get_observation()
+            obs = self.robot.get_observation()
             print(f"Robot state: {obs}")
             return obs
         except Exception as e:
@@ -276,8 +271,8 @@ class RobotController:
     # ------------------------------------------------------------------
 
     def start(self):
-        print(f"Starting RobotController  rate={self.control_rate:.0f}Hz  "
-              f"device={self.control_device.value}  mode={self.control_mode.value}")
+        print(f"Starting {type(self).__name__}  rate={self.control_rate:.0f}Hz  "
+              f"device={self.control_device.value}")
 
         try:
             if self.simulation_mode:
@@ -286,7 +281,7 @@ class RobotController:
                 self.simulator.init_simulation()
 
             self.control_thread.start()
-            self.controller.run()   # blocks on main thread (pyglet / pygame event loop)
+            self.input_device.run()   # blocks on main thread (pyglet / pygame event loop)
 
         except KeyboardInterrupt:
             print("\nStopping due to keyboard interrupt")
@@ -296,10 +291,10 @@ class RobotController:
             self.stop()
 
     def stop(self):
-        print("Stopping RobotController")
+        print("Stopping TeleopSession")
         self.running = False
         try:
-            self.sdk.stop_robot()
+            self.robot.stop_robot()
         except Exception as e:
             print(f"Error stopping robot: {e}")
         # Only disconnect PyBullet if init_simulation() was actually called.
@@ -315,8 +310,71 @@ class RobotController:
             self.control_thread.join(timeout=2.0)
 
 
-# Backward-compatible alias
-CombinedController = RobotController
+# ------------------------------------------------------------------
+# Concrete implementations
+# ------------------------------------------------------------------
+
+class JointTeleopSession(TeleopSession):
+    """Teleoperation in joint space: commands are joint-angle deltas."""
+
+    def _build_joystick_device(self):
+        return JointJoystickController()
+
+    def _apply_command(self, cmd: torch.Tensor) -> None:
+        self.target_joint_angles = self.target_joint_angles + cmd
+        print(f"Joint command: {cmd}")
+        print(f"Target joint angles: {self.target_joint_angles}")
+
+
+class CartesianTeleopSession(TeleopSession):
+    """Teleoperation in Cartesian space: commands are XYZ position deltas solved via IK."""
+
+    def _build_joystick_device(self):
+        return CartesianJoystickController()
+
+    def _apply_command(self, cmd: torch.Tensor) -> None:
+        """cmd[:3] is a Cartesian position delta (metres); gripper is preserved."""
+        delta_xyz = cmd[:3].numpy()
+        target_tcp = self.current_tcp + delta_xyz
+
+        ik_angles = self.robot.kinematics.ik(
+            target_tcp,
+            initial_guess=self.target_joint_angles.numpy(),
+            real_robot=True,
+        )
+        joints_5dof = self.robot.kinematics.sim_to_real(ik_angles)
+        gripper = float(self.target_joint_angles[5])
+        self.target_joint_angles = torch.tensor(
+            np.append(joints_5dof, gripper), dtype=torch.float32
+        )
+        self.current_tcp = target_tcp
+
+
+# ------------------------------------------------------------------
+# Session factory
+# ------------------------------------------------------------------
+
+_SESSION_CLASSES: dict[ControlMode, type[TeleopSession]] = {
+    ControlMode.JOINT: JointTeleopSession,
+    ControlMode.CARTESIAN: CartesianTeleopSession,
+}
+
+
+def create_session(
+    control_device: ControlDevice = ControlDevice.JOYSTICK,
+    control_mode: ControlMode = ControlMode.JOINT,
+    simulate: bool = False,
+    robot_config=None,
+    control_rate: float = 30.0,
+) -> TeleopSession:
+    """Instantiate the correct TeleopSession subclass for the given mode."""
+    cls = _SESSION_CLASSES[control_mode]
+    return cls(
+        control_device=control_device,
+        simulate=simulate,
+        robot_config=robot_config,
+        control_rate=control_rate,
+    )
 
 
 # ------------------------------------------------------------------
@@ -324,7 +382,7 @@ CombinedController = RobotController
 # ------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="SO-100 Robot Controller")
+    parser = argparse.ArgumentParser(description="SO-100 Robot Teleoperation")
     parser.add_argument(
         "--device", type=str, default="joystick",
         choices=[e.value for e in ControlDevice],
@@ -350,7 +408,7 @@ def main():
         from so100_robot_control.configs.robot_loader import load_robot_config
         robot_config = load_robot_config(args.robot)
 
-    controller = RobotController(
+    session = create_session(
         control_device=ControlDevice(args.device),
         control_mode=ControlMode(args.control_mode),
         simulate=args.simulate,
@@ -358,11 +416,11 @@ def main():
     )
 
     try:
-        controller.start()
+        session.start()
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
-        controller.stop()
+        session.stop()
 
 
 if __name__ == "__main__":
